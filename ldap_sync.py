@@ -177,7 +177,7 @@ class LDAPSync():
                 # ToDo make the date check and the rest
                 source_date = sources[source_dn]['modifyTimestamp']
                 target_date = destination[dest_dn]['modifyTimestamp']
-                if source_date < target_date:
+                if source_date > target_date:
                     source_info = sources[source_dn]
                     dest_info = destination[dest_dn]
                     source_members = [
