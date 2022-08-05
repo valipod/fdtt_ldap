@@ -1,0 +1,13 @@
+[sync_config]
+; or absolute path to log file
+log: syslog
+source_dn: ou=fdt_groups,dc=everything,dc=thecompany,dc=ro
+target_dn: ou=dest_groups,dc=everything,dc=thecompany,dc=ro
+
+
+[ldap_config]
+ldap_server: ldaps://ldap.thecompany.ro:1636
+users_dn: ou=fdt_users,dc=everything,dc=thecompany,dc=ro
+encoding: utf-8
+user_dn: cn=Boat Administrator,dc=thecompany,dc=ro
+user_pw: 123456789z
