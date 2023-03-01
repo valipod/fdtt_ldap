@@ -5,6 +5,7 @@ from configparser import ConfigParser
 from logging.handlers import SysLogHandler
 from functools import wraps
 from string import ascii_letters, digits
+import collections
 import getopt
 import ldap
 import ldap.filter
@@ -69,7 +70,6 @@ try:  # Handle cmd arguments
 except getopt.GetoptError:
     usage()
 
-logfile = None
 ldap_config = {}
 config_file = 'ldap_sync.ini'
 logfile = None
@@ -99,7 +99,7 @@ except KeyError:
 log = logging.getLogger('ldap_sync')
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-if logfile is not None:
+if logfile is not None and logfile != 'syslog':
     log_handler = logging.FileHandler(logfile, 'a')
     log_handler.setFormatter(formatter)
 else:
@@ -262,7 +262,7 @@ class LdapAgent(object):
             if name in self.group_schema:
                 if name == 'memberUid':
                     member_dns = [
-                        self._user_dn(member) for member in value
+                        self._user_dn(uid) for uid in value if uid
                     ]
                     value = member_dns
                 attrs.append(
@@ -392,6 +392,16 @@ class LDAPSync():
                                     "Added %s to %s" % (member, dest_dn)
                                 )
             else:
+                source_members = sources[source_dn]['memberUid']
+                if b'' in source_members:
+                    log_message("Empty memberUid in %s" % source_dn)
+                dupe_source_members = [
+                    item for item, count in
+                    collections.Counter(source_members).items() if count > 1]
+                if dupe_source_members:
+                    log_message("Duplicate memberUid entries in %s: %s" %
+                                (source_dn, dupe_source_members))
+                    sources[source_dn]['memberUid'] = set(source_members)
                 self.agent.create_group(group_id, sources[source_dn])
                 log_message("Created group %s" % dest_dn)
 
