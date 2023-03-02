@@ -27,6 +27,7 @@ RETURN_CODES = {
     'EX_SSL':          32,  # SSL error
     'EX_TARGET_NEWER': 64,  # target group has newer timestamp
     'EX_CREDENTIALS':  67,  # invalid LDAP credentials
+    'EX_STRUCTURE':    68,  # invalid/unexpected LDAP structure
     'EX_UNIDENTIFIED': 97,  # other error
 
     'EX_UNAVAILABLE':  69,  # service unavailable
@@ -101,13 +102,12 @@ formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
 if logfile is not None and logfile != 'syslog':
     log_handler = logging.FileHandler(logfile, 'a')
-    log_handler.setFormatter(formatter)
 else:
     log_handler = SysLogHandler('/dev/log',
                                 facility=SysLogHandler.LOG_LOCAL6)
     formatter = logging.Formatter(
         "%(name)s: %(levelname)s - %(message)s")
-    log_handler.setFormatter(formatter)
+log_handler.setFormatter(formatter)
 log.setLevel(logging.INFO)
 log.addHandler(log_handler)
 
@@ -132,13 +132,26 @@ def log_exceptions(func):
         ''' wrapper '''
         try:
             return func(*args, **kwargs)
-        except ldap.LDAPError:
-            log_error("Uncaught exception from LDAP")
-        except Exception:
-            log_error("Uncaught exception from %r" % func)
+        except ldap.LDAPError as e:
+            log_error(e)
+        except (InvalidLDAPStructure, InvalidLDAPData) as e:
+            log_error(e)
+            return RETURN_CODES['EX_STRUCTURE']
+        except Exception as e:
+            log_error("Uncaught exception from %r, %s" % (func, e))
             return RETURN_CODES['EX_SOFTWARE']
 
     return wrapper
+
+
+class InvalidLDAPStructure(Exception):
+    ...
+    pass
+
+
+class InvalidLDAPData(Exception):
+    ...
+    pass
 
 
 class LdapAgent(object):
@@ -166,60 +179,37 @@ class LdapAgent(object):
         conn.protocol_version = ldap.VERSION3
         return conn
 
-    def _source_dn(self, group_id):
-        return self._group_dn(group_id, self.source_dn)
+    def _ou_dn(self, ou_id, ou_dn_suffix):
+        return 'ou=%s,%s' % (ou_id, ou_dn_suffix)
 
-    def _target_dn(self, group_id):
-        return self._group_dn(group_id, self.target_dn)
-
-    def _group_dn(self, group_id, group_dn_suffix):
-        if group_id is None:
-            id_bits = []
-        else:
-            id_bits = group_id.split('-')
-
-        dn_start = ''
-        for c in range(len(id_bits), 0, -1):
-            dn_start += 'cn=%s,' % '-'.join(id_bits[:c])
-        return dn_start + group_dn_suffix
-
-    def _source_id(self, group_dn):
-        ''' get source group id from group dn '''
-        return self._group_id(group_dn, self.source_dn)
-
-    def _target_id(self, group_dn):
-        ''' get source group id from group dn '''
-        return self._group_id(group_dn, self.target_dn)
-
-    def _group_id(self, group_dn, group_dn_suffix):
+    def _group_id(self, group_dn):
         ''' get group id from group dn '''
-        if group_dn == group_dn_suffix:
-            return None
-        assert group_dn.endswith(',' + group_dn_suffix)
-        group_dn_start = group_dn[: - (len(group_dn_suffix) + 1)]
-        dn_bits = group_dn_start.split(',')
-        dn_bits.reverse()
+        dn_bits = group_dn.split(',')
+        if not dn_bits[0].startswith('cn='):
+            raise InvalidLDAPStructure(
+                "groupOfNames %s does not start with 'cn='" % group_dn
+            )
 
-        current_bit = None
+        return dn_bits[0][len('cn='):]
 
-        for bit in dn_bits:
-            assert bit.startswith('cn=')
-            bit = bit[len('cn='):]
+    def _ou_id(self, ou_dn):
+        ''' get ou id from ou dn '''
+        dn_bits = ou_dn.split(',')
+        if not dn_bits[0].startswith('ou='):
+            raise InvalidLDAPStructure(
+                "organizationalUnit dn %s does not start with 'ou='" % ou_dn
+            )
 
-            if current_bit is None:
-                assert '-' not in bit
-            else:
-                assert bit.startswith(current_bit + '-')
-                assert '-' not in bit[len(current_bit) + 1:]
-            current_bit = bit
-
-        return current_bit
+        return dn_bits[0][len('ou='):]
 
     def _user_id(self, user_dn):
-        assert user_dn.endswith(',' + self._user_dn_suffix)
-        assert user_dn.startswith('uid=')
+        assert user_dn.endswith(',' + self._user_dn_suffix), \
+            "user dn %s doesn't end with ,%s" % (user_dn,
+                                                 self._user_dn_suffix)
+        assert user_dn.startswith('uid='), \
+            "user dn %s doesn't start with 'uid='" % user_dn
         user_id = user_dn[len('uid='): - (len(self._user_dn_suffix) + 1)]
-        assert ',' not in user_id
+        assert ',' not in user_id, "',' shouldn't exist in %s" % user_id
         return user_id
 
     def _user_dn(self, user_id):
@@ -227,27 +217,31 @@ class LdapAgent(object):
             user_id = user_id.decode(self._encoding)
         except AttributeError:
             pass
-        assert ',' not in user_id
-        user_dn = 'uid=' + user_id + ',' + self._user_dn_suffix
+        assert ',' not in user_id, "',' shouldn't exist in %s" % user_id
+        user_dn = 'uid=%s,%s' % (user_id, self._user_dn_suffix)
         return user_dn.encode(self._encoding)
 
     @log_exceptions
-    def delete_group(self, group_dn):
-        ''' delete group '''
+    def delete_dn(self, dn):
+        ''' delete LDAP object by dn '''
 
-        for dn in self._sub_groups(group_dn):
-            result = self.conn.delete_s(dn)
-            assert result[:2] == (ldap.RES_DELETE, [])
+        result = self.conn.delete_s(dn)
+        assert result[:2] == (ldap.RES_DELETE, []), \
+            "result %s is not the expected %s" % (result[:2],
+                                                  (ldap.RES_DELETE, []))
 
     @log_exceptions
-    def create_group(self, group_id, group_info):
+    def create_group(self, group_dn, group_info):
         """ Create a new group with attributes from `group_info` """
-        log_message("Creating group %r" % group_id)
-        assert isinstance(group_id, str)
+        log_message("Creating group %r" % group_dn)
+        assert isinstance(group_dn, str), \
+            "group dn %s is not a plain string" % group_dn
 
-        for ch in group_id:
-            assert ch in ascii_letters + digits + '_'
+        for ch in group_dn:
+            assert ch in ascii_letters + digits + '=_-,', \
+                "char %s is not in ascii + digits + '=_-,'" % ch
 
+        group_id = self._group_id(group_dn)
         attrs = [
             ('cn', [group_id.encode()]),
             ('objectClass', [
@@ -270,10 +264,34 @@ class LdapAgent(object):
         if not group_info.get("memberUid"):
             attrs.append(('member', [b'']))
 
-        group_dn = self._target_dn(group_id)
         result = self.conn.add_s(group_dn, attrs)
 
-        assert result[:2] == (ldap.RES_ADD, [])
+        assert result[:2] == (ldap.RES_ADD, []), \
+            "result %s is not the expected %s" % (result[:2],
+                                                  (ldap.RES_ADD, []))
+
+    @log_exceptions
+    def create_ou(self, ou_dn):
+        """ Create a new organizationalUnit """
+        log_message("Creating organizationalUnit %r" % ou_dn)
+        if not isinstance(ou_dn, str):
+            raise InvalidLDAPStructure(
+                "organizationalUnit dn %s is not a plain string" % ou_dn
+            )
+
+        for ch in ou_dn:
+            if ch not in ascii_letters + digits + '=_-,':
+                raise InvalidLDAPStructure(
+                    "char %s is not in ascii + digits + '=_-,'" % ch
+                )
+
+        attrs = [('objectClass', [b'top', b'organizationalUnit']), ]
+
+        result = self.conn.add_s(ou_dn, attrs)
+
+        assert result[:2] == (ldap.RES_ADD, []), \
+            "result %s is not the expected %s" % (result[:2],
+                                                  (ldap.RES_ADD, []))
 
     @log_exceptions
     def add_member_to_group(self, group_dn, member_dn):
@@ -292,7 +310,9 @@ class LdapAgent(object):
         except ldap.NO_SUCH_ATTRIBUTE:
             pass  # so the group was not empty. that's fine.
         else:
-            assert result[:2] == (ldap.RES_MODIFY, [])
+            assert result[:2] == (ldap.RES_MODIFY, []), \
+                "result %s is not the expected %s" % (result[:2],
+                                                      (ldap.RES_MODIFY, []))
             log_message("Removed placeholder member from %r" % group_dn)
 
     @log_exceptions
@@ -335,43 +355,82 @@ class LDAPSync():
 
     @log_exceptions
     def sync(self):
-        sources = dict(self.agent.conn.search_s(
+        source_ous = dict(self.agent.conn.search_s(
+            self.source_dn,
+            ldap.SCOPE_SUBTREE,
+            "(&(objectClass=organizationalUnit))",
+            attrlist=(["description"])
+        ))
+
+        source_groups = dict(self.agent.conn.search_s(
             self.source_dn,
             ldap.SCOPE_SUBTREE,
             "(&(objectClass=posixGroup))",
             attrlist=(["description", "memberUid", "modifyTimestamp"])
         ))
-        destination = dict(self.agent.conn.search_s(
+
+        try:
+            destination_groups = dict(self.agent.conn.search_s(
+                self.target_dn,
+                ldap.SCOPE_SUBTREE,
+                "(&(objectClass=groupOfNames))",
+                attrlist=(["description", "member", "modifyTimestamp"])
+            ))
+        except ldap.NO_SUCH_OBJECT:
+            result = self.agent.create_ou(self.target_dn)
+            assert result[:2] == (ldap.RES_ADD, []), \
+                "result %s is not the expected %s" % (result[:2],
+                                                      (ldap.RES_ADD, []))
+            destination_groups = {}
+
+        destination_ous = dict(self.agent.conn.search_s(
             self.target_dn,
             ldap.SCOPE_SUBTREE,
-            "(&(objectClass=groupOfNames))",
-            attrlist=(["description", "member", "modifyTimestamp"])
+            "(&(objectClass=organizationalUnit))",
+            attrlist=(["description"])
         ))
-        # First check if there is any group in destination ou that was deleted
+        # First check if there is any ou in destination that was deleted
         # from source
-        for dest_dn in destination:
-            group_id = self.agent._target_id(dest_dn)
-            source_dn = self.agent._source_dn(group_id)
-            if source_dn in sources:
-                pass
-            else:
-                # Delete the group from destination
-                self.agent.delete_group(dest_dn)
+        for dest_dn in destination_ous:
+            if dest_dn == self.target_dn:
+                continue
+            ou_id = self.agent._ou_id(dest_dn)
+            source_dn = self.agent._ou_dn(ou_id, self.source_dn)
+            if source_dn not in source_ous:
+                # Delete the organizationalUnit from destination
+                self.agent.delete_dn(dest_dn)
+                log_message("Deleted organizationalUnit %s" % dest_dn)
+        # Create all source organizationalUnits in destination
+        for source_dn in source_ous:
+            if source_dn == self.source_dn:
+                continue
+            ou_id = self.agent._ou_id(source_dn)
+            dest_dn = self.agent._ou_dn(ou_id, self.target_dn)
+            if dest_dn not in destination_ous:
+                self.agent.create_ou(dest_dn)
+                log_message("Created organizationalUnit %s" % dest_dn)
+
+        # Check if there is any group in destination that was deleted
+        # from source
+        for dest_dn in destination_groups:
+            source_dn = dest_dn.replace(self.target_dn, self.source_dn)
+            if source_dn not in source_groups:
+                # Delete the group from destination_groups
+                self.agent.delete_dn(dest_dn)
                 log_message("Deleted group %s" % dest_dn)
-        # Create all source groups in destination
-        for source_dn in sources:
-            group_id = self.agent._source_id(source_dn)
-            dest_dn = self.agent._target_dn(group_id)
-            if dest_dn in destination:
+        # Create all source groups in destination_groups
+        for source_dn in source_groups:
+            dest_dn = source_dn.replace(self.source_dn, self.target_dn)
+            if dest_dn in destination_groups:
                 # ToDo make the date check and the rest
-                source_date = sources[source_dn]['modifyTimestamp']
-                target_date = destination[dest_dn]['modifyTimestamp']
+                source_date = source_groups[source_dn]['modifyTimestamp']
+                target_date = destination_groups[dest_dn]['modifyTimestamp']
                 if source_date > target_date:
-                    source_info = sources[source_dn]
-                    dest_info = destination[dest_dn]
+                    source_info = source_groups[source_dn]
+                    dest_info = destination_groups[dest_dn]
                     source_members = [
                         self.agent._user_dn(uid) for
-                        uid in source_info['memberUid']
+                        uid in source_info.get('memberUid', [])
                     ]
                     target_members = dest_info['member']
                     if source_members != target_members:
@@ -392,7 +451,7 @@ class LDAPSync():
                                     "Added %s to %s" % (member, dest_dn)
                                 )
             else:
-                source_members = sources[source_dn]['memberUid']
+                source_members = source_groups[source_dn].get('memberUid', [])
                 if b'' in source_members:
                     log_message("Empty memberUid in %s" % source_dn)
                 dupe_source_members = [
@@ -401,8 +460,8 @@ class LDAPSync():
                 if dupe_source_members:
                     log_message("Duplicate memberUid entries in %s: %s" %
                                 (source_dn, dupe_source_members))
-                    sources[source_dn]['memberUid'] = set(source_members)
-                self.agent.create_group(group_id, sources[source_dn])
+                    source_groups[source_dn]['memberUid'] = set(source_members)
+                self.agent.create_group(dest_dn, source_groups[source_dn])
                 log_message("Created group %s" % dest_dn)
 
 
