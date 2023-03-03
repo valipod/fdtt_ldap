@@ -28,6 +28,7 @@ RETURN_CODES = {
     'EX_TARGET_NEWER': 64,  # target group has newer timestamp
     'EX_CREDENTIALS':  67,  # invalid LDAP credentials
     'EX_STRUCTURE':    68,  # invalid/unexpected LDAP structure
+    'EX_RESPONSE':     69,  # unexpected LDAP response
     'EX_UNIDENTIFIED': 97,  # other error
 
     'EX_UNAVAILABLE':  69,  # service unavailable
@@ -134,7 +135,10 @@ def log_exceptions(func):
             return func(*args, **kwargs)
         except ldap.LDAPError as e:
             log_error(e)
-        except (InvalidLDAPStructure, InvalidLDAPData) as e:
+        except UnexpectedLDAPResponse as e:
+            log_error(e)
+            return RETURN_CODES['EX_RESPONSE']
+        except InvalidLDAPStructure as e:
             log_error(e)
             return RETURN_CODES['EX_STRUCTURE']
         except Exception as e:
@@ -149,7 +153,7 @@ class InvalidLDAPStructure(Exception):
     pass
 
 
-class InvalidLDAPData(Exception):
+class UnexpectedLDAPResponse(Exception):
     ...
     pass
 
@@ -203,21 +207,30 @@ class LdapAgent(object):
         return dn_bits[0][len('ou='):]
 
     def _user_id(self, user_dn):
-        assert user_dn.endswith(',' + self._user_dn_suffix), \
-            "user dn %s doesn't end with ,%s" % (user_dn,
-                                                 self._user_dn_suffix)
-        assert user_dn.startswith('uid='), \
-            "user dn %s doesn't start with 'uid='" % user_dn
+        if not user_dn.endswith(',' + self._user_dn_suffix):
+            raise InvalidLDAPStructure(
+                "user dn %s doesn't end with ,%s" %
+                (user_dn, self._user_dn_suffix)
+            )
+        if not user_dn.startswith('uid='):
+            raise InvalidLDAPStructure(
+                "user dn %s doesn't start with 'uid='" % user_dn
+            )
         user_id = user_dn[len('uid='): - (len(self._user_dn_suffix) + 1)]
-        assert ',' not in user_id, "',' shouldn't exist in %s" % user_id
+        if ',' in user_id:
+            raise InvalidLDAPStructure(
+                "',' shouldn't exist in user_id %s" % user_id)
         return user_id
 
     def _user_dn(self, user_id):
         try:
             user_id = user_id.decode(self._encoding)
         except AttributeError:
+            # already str
             pass
-        assert ',' not in user_id, "',' shouldn't exist in %s" % user_id
+        if ',' in user_id:
+            raise InvalidLDAPStructure(
+                "',' shouldn't exist in user_id %s" % user_id)
         user_dn = 'uid=%s,%s' % (user_id, self._user_dn_suffix)
         return user_dn.encode(self._encoding)
 
@@ -226,20 +239,26 @@ class LdapAgent(object):
         ''' delete LDAP object by dn '''
 
         result = self.conn.delete_s(dn)
-        assert result[:2] == (ldap.RES_DELETE, []), \
-            "result %s is not the expected %s" % (result[:2],
-                                                  (ldap.RES_DELETE, []))
+        if result[:2] != (ldap.RES_DELETE, []):
+            raise UnexpectedLDAPResponse(
+                "result %s is not the expected %s" %
+                (result[:2], (ldap.RES_DELETE, []))
+            )
 
     @log_exceptions
     def create_group(self, group_dn, group_info):
         """ Create a new group with attributes from `group_info` """
         log_message("Creating group %r" % group_dn)
-        assert isinstance(group_dn, str), \
-            "group dn %s is not a plain string" % group_dn
+        if not isinstance(group_dn, str):
+            raise InvalidLDAPStructure(
+                "group dn %s is not a plain string" % group_dn
+            )
 
         for ch in group_dn:
-            assert ch in ascii_letters + digits + '=_-,', \
-                "char %s is not in ascii + digits + '=_-,'" % ch
+            if ch not in ascii_letters + digits + '=_-,':
+                raise InvalidLDAPStructure(
+                    "char %s is not in ascii + digits + '=_-,'" % ch
+                )
 
         group_id = self._group_id(group_dn)
         attrs = [
@@ -266,9 +285,11 @@ class LdapAgent(object):
 
         result = self.conn.add_s(group_dn, attrs)
 
-        assert result[:2] == (ldap.RES_ADD, []), \
-            "result %s is not the expected %s" % (result[:2],
-                                                  (ldap.RES_ADD, []))
+        if result[:2] != (ldap.RES_ADD, []):
+            raise UnexpectedLDAPResponse(
+                "result %s is not the expected %s" %
+                (result[:2], (ldap.RES_ADD, []))
+            )
 
     @log_exceptions
     def create_ou(self, ou_dn):
@@ -289,9 +310,11 @@ class LdapAgent(object):
 
         result = self.conn.add_s(ou_dn, attrs)
 
-        assert result[:2] == (ldap.RES_ADD, []), \
-            "result %s is not the expected %s" % (result[:2],
-                                                  (ldap.RES_ADD, []))
+        if result[:2] != (ldap.RES_ADD, []):
+            raise UnexpectedLDAPResponse(
+                "result %s is not the expected %s" %
+                (result[:2], (ldap.RES_ADD, []))
+            )
 
     @log_exceptions
     def add_member_to_group(self, group_dn, member_dn):
@@ -310,9 +333,11 @@ class LdapAgent(object):
         except ldap.NO_SUCH_ATTRIBUTE:
             pass  # so the group was not empty. that's fine.
         else:
-            assert result[:2] == (ldap.RES_MODIFY, []), \
-                "result %s is not the expected %s" % (result[:2],
-                                                      (ldap.RES_MODIFY, []))
+            if result[:2] != (ldap.RES_MODIFY, []):
+                raise UnexpectedLDAPResponse(
+                    "result %s is not the expected %s" %
+                    (result[:2], (ldap.RES_MODIFY, []))
+                )
             log_message("Removed placeholder member from %r" % group_dn)
 
     @log_exceptions
@@ -355,6 +380,7 @@ class LDAPSync():
 
     @log_exceptions
     def sync(self):
+        import ipdb;ipdb.set_trace()
         source_ous = dict(self.agent.conn.search_s(
             self.source_dn,
             ldap.SCOPE_SUBTREE,
@@ -377,10 +403,7 @@ class LDAPSync():
                 attrlist=(["description", "member", "modifyTimestamp"])
             ))
         except ldap.NO_SUCH_OBJECT:
-            result = self.agent.create_ou(self.target_dn)
-            assert result[:2] == (ldap.RES_ADD, []), \
-                "result %s is not the expected %s" % (result[:2],
-                                                      (ldap.RES_ADD, []))
+            self.agent.create_ou(self.target_dn)
             destination_groups = {}
 
         destination_ous = dict(self.agent.conn.search_s(
@@ -453,13 +476,13 @@ class LDAPSync():
             else:
                 source_members = source_groups[source_dn].get('memberUid', [])
                 if b'' in source_members:
-                    log_message("Empty memberUid in %s" % source_dn)
+                    log_error("Empty memberUid in %s" % source_dn)
                 dupe_source_members = [
                     item for item, count in
                     collections.Counter(source_members).items() if count > 1]
                 if dupe_source_members:
-                    log_message("Duplicate memberUid entries in %s: %s" %
-                                (source_dn, dupe_source_members))
+                    log_error("Duplicate memberUid entries in %s: %s" %
+                              (source_dn, dupe_source_members))
                     source_groups[source_dn]['memberUid'] = set(source_members)
                 self.agent.create_group(dest_dn, source_groups[source_dn])
                 log_message("Created group %s" % dest_dn)
