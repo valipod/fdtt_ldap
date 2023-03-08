@@ -380,7 +380,6 @@ class LDAPSync():
 
     @log_exceptions
     def sync(self):
-        import ipdb;ipdb.set_trace()
         source_ous = dict(self.agent.conn.search_s(
             self.source_dn,
             ldap.SCOPE_SUBTREE,
