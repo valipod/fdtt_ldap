@@ -343,7 +343,7 @@ class LdapAgent(object):
     @log_exceptions
     def remove_member_from_group(self, group_dn, member_dn):
         """ remove a member from a group """
-        log_message("Removing member %r from %r" & (member_dn, group_dn))
+        log_message("Removing member %r from %r" % (member_dn, group_dn))
 
         def _remove():
             ''' remove '''
@@ -363,6 +363,9 @@ class LdapAgent(object):
             log_message("Adding placeholder uniqueMember for %r" & group_dn)
             _add_placeholder()
             _remove()
+        log_message(
+            "Removed %s from %s" % (member_dn, group_dn)
+        )
 
 
 class LDAPSync():
@@ -460,9 +463,6 @@ class LDAPSync():
                             if member not in source_members:
                                 self.agent.remove_member_from_group(
                                     dest_dn, member
-                                )
-                                log_message(
-                                    "Removed %s from %s" % (member, dest_dn)
                                 )
                         for member in source_members:
                             if member not in target_members:
