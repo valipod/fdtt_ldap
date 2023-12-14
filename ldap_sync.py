@@ -360,7 +360,7 @@ class LdapAgent(object):
         try:
             _remove()
         except ldap.OBJECT_CLASS_VIOLATION:
-            log_message("Adding placeholder uniqueMember for %r" & group_dn)
+            log_message("Adding placeholder uniqueMember for %r" % group_dn)
             _add_placeholder()
             _remove()
         log_message(
