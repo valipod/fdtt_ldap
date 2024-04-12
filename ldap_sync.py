@@ -381,6 +381,14 @@ class LDAPSync():
         self.agent.source_dn = self.source_dn
         self.agent.target_dn = self.target_dn
 
+
+    def group_members(self, source_info) -> list:
+        """ return list of group members """
+        return [
+            self.agent._user_dn(uid) for uid in source_info.get('memberUid',
+                                                                [])
+        ]
+
     @log_exceptions
     def sync(self):
         source_ous = dict(self.agent.conn.search_s(
@@ -425,13 +433,18 @@ class LDAPSync():
                 # Delete the organizationalUnit from destination
                 self.agent.delete_dn(dest_dn)
                 log_message("Deleted organizationalUnit %s" % dest_dn)
-        # Create all source organizationalUnits in destination
+        # Create or delete (if source is empty) source organizationalUnits in destination
         for source_dn in source_ous:
             if source_dn == self.source_dn:
                 continue
             ou_id = self.agent._ou_id(source_dn)
             dest_dn = self.agent._ou_dn(ou_id, self.target_dn)
-            if dest_dn not in destination_ous:
+            if dest_dn in destination_ous:
+                if not self.group_members(source_groups[source_dn]):
+                    # We actually need to delete the target group, since the source is empty
+                    self.delete_ou(dest_dn)
+                    log_message("Deleted organizationalUnit %s" % dest_dn)
+            else:
                 self.agent.create_ou(dest_dn)
                 log_message("Created organizationalUnit %s" % dest_dn)
 
@@ -444,51 +457,52 @@ class LDAPSync():
                 self.agent.delete_dn(dest_dn)
                 log_message("Deleted group %s" % dest_dn)
         # Create all source groups in destination_groups
-        for source_dn in source_groups:
+        for source_dn, source_info in source_groups.items():
             dest_dn = source_dn.replace(self.source_dn, self.target_dn)
             if dest_dn in destination_groups:
-                # ToDo make the date check and the rest
-                source_date = source_groups[source_dn]['modifyTimestamp']
-                target_date = destination_groups[dest_dn]['modifyTimestamp']
-                if source_date > target_date:
-                    source_info = source_groups[source_dn]
-                    dest_info = destination_groups[dest_dn]
-                    source_members = [
-                        self.agent._user_dn(uid) for
-                        uid in source_info.get('memberUid', [])
-                    ]
-                    target_members = dest_info['member']
-                    if source_members != target_members:
-                        if len(source_members) == 0:
-                            log_error(
-                                "Source group %s has no members! At least a placeholder is mandatory!"
-                                % source_dn)
-                        for member in target_members:
-                            if member not in source_members and member != b'':
-                                self.agent.remove_member_from_group(
-                                    dest_dn, member
-                                )
-                        for member in source_members:
-                            if member not in target_members:
-                                self.agent.add_member_to_group(
-                                    dest_dn, member
-                                )
-                                log_message(
-                                    "Added %s to %s" % (member, dest_dn)
-                                )
+                # The group already exists, its content needs to be synchronized
+                # or deleted if the source group is empty
+                dest_info = destination_groups[dest_dn]
+                source_members = self.group_members(source_info)
+                if not source_members:
+                    log_message(
+                        "Source group %s has no members. "
+                        "Deleting destination group %s" % (source_dn, dest_dn))
+                    self.delete_ou(dest_dn)
+                else:
+                    source_date = source_info['modifyTimestamp']
+                    target_date = destination_groups[dest_dn]['modifyTimestamp']
+                    if source_date > target_date:
+                        target_members = dest_info['member']
+                        if source_members != target_members:
+                            for member in target_members:
+                                if member not in source_members and member != b'':
+                                    self.agent.remove_member_from_group(
+                                        dest_dn, member
+                                    )
+                            for member in source_members:
+                                if member not in target_members:
+                                    self.agent.add_member_to_group(
+                                        dest_dn, member
+                                    )
+                                    log_message(
+                                        "Added %s to %s" % (member, dest_dn)
+                                    )
             else:
                 source_members = source_groups[source_dn].get('memberUid', [])
-                if b'' in source_members and len(source_members) > 1:
-                    log_error("Empty memberUid in %s" % source_dn)
-                dupe_source_members = [
-                    item for item, count in
-                    collections.Counter(source_members).items() if count > 1]
-                if dupe_source_members:
-                    log_error("Duplicate memberUid entries in %s: %s" %
-                              (source_dn, dupe_source_members))
-                    source_groups[source_dn]['memberUid'] = set(source_members)
-                self.agent.create_group(dest_dn, source_groups[source_dn])
-                log_message("Created group %s" % dest_dn)
+                if source_members:
+                    # We only create the destination group if the source has members
+                    if b'' in source_members and len(source_members) > 1:
+                        log_error("Empty memberUid in %s" % source_dn)
+                    dupe_source_members = [
+                        item for item, count in
+                        collections.Counter(source_members).items() if count > 1]
+                    if dupe_source_members:
+                        log_error("Duplicate memberUid entries in %s: %s" %
+                                (source_dn, dupe_source_members))
+                        source_groups[source_dn]['memberUid'] = set(source_members)
+                    self.agent.create_group(dest_dn, source_groups[source_dn])
+                    log_message("Created group %s" % dest_dn)
 
 
 def main():
