@@ -459,8 +459,12 @@ class LDAPSync():
                     ]
                     target_members = dest_info['member']
                     if source_members != target_members:
+                        if len(source_members) == 0:
+                            log_error(
+                                "Source group %s has no members! At least a placeholder is mandatory!"
+                                % source_dn)
                         for member in target_members:
-                            if member not in source_members:
+                            if member not in source_members and member != b'':
                                 self.agent.remove_member_from_group(
                                     dest_dn, member
                                 )
@@ -474,7 +478,7 @@ class LDAPSync():
                                 )
             else:
                 source_members = source_groups[source_dn].get('memberUid', [])
-                if b'' in source_members:
+                if b'' in source_members and len(source_members) > 1:
                     log_error("Empty memberUid in %s" % source_dn)
                 dupe_source_members = [
                     item for item, count in
