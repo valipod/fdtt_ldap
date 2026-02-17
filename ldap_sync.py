@@ -8,12 +8,10 @@ from string import ascii_letters, digits
 import collections
 import getopt
 import ldap
-import ldap.filter
 import logging
 import sys
 import os
 import time
-import six
 
 __version__ = """$Id: ldap_sync.py 2020-09-09 18:00:00Z dumitval $"""
 
@@ -26,9 +24,9 @@ RETURN_CODES = {
     'EX_NETWORK':      16,  # network error
     'EX_SSL':          32,  # SSL error
     'EX_TARGET_NEWER': 64,  # target group has newer timestamp
+    'EX_RESPONSE':     65,  # unexpected LDAP response
     'EX_CREDENTIALS':  67,  # invalid LDAP credentials
     'EX_STRUCTURE':    68,  # invalid/unexpected LDAP structure
-    'EX_RESPONSE':     69,  # unexpected LDAP response
     'EX_UNIDENTIFIED': 97,  # other error
 
     'EX_UNAVAILABLE':  69,  # service unavailable
@@ -40,6 +38,7 @@ RETURN_CODES = {
     'EX_TEMPFAIL':     75,  # temp failure; user is invited to retry
     'EX_PROTOCOL':     76,  # remote error in protocol
     'EX_NOPERM':       77,  # permission denied
+    'EX_USAGE':        78,  # command line usage error
 }
 
 
@@ -84,9 +83,9 @@ try:
             config_file = value
         elif flag == '-o':
             logfile = value
-        elif flag in ('-f, force'):
+        elif flag in ('-f', '--force'):
             force_sync = True
-        elif flag in ('-s', 'silent'):
+        elif flag in ('-s', '--silent'):
             silent = True
     config = ConfigParser()
     config.read([config_file])
@@ -149,12 +148,10 @@ def log_exceptions(func):
 
 
 class InvalidLDAPStructure(Exception):
-    ...
     pass
 
 
 class UnexpectedLDAPResponse(Exception):
-    ...
     pass
 
 
@@ -269,7 +266,7 @@ class LdapAgent(object):
             ),
         ]
 
-        for name, value in sorted(six.iteritems(group_info)):
+        for name, value in sorted(group_info.items()):
             if not value:
                 continue
             if name in self.group_schema:
@@ -376,7 +373,7 @@ class LDAPSync():
         except KeyError:
             log_error("Invalid ini file")
             close()
-            return RETURN_CODES["EX_CONFIG"]
+            raise
         self.agent = ldap_agent
         self.agent.source_dn = self.source_dn
         self.agent.target_dn = self.target_dn
@@ -442,7 +439,7 @@ class LDAPSync():
             if dest_dn in destination_ous:
                 if not self.group_members(source_groups[source_dn]):
                     # We actually need to delete the target group, since the source is empty
-                    self.delete_ou(dest_dn)
+                    self.agent.delete_dn(dest_dn)
                     log_message("Deleted organizationalUnit %s" % dest_dn)
             else:
                 self.agent.create_ou(dest_dn)
@@ -468,7 +465,7 @@ class LDAPSync():
                     log_message(
                         "Source group %s has no members. "
                         "Deleting destination group %s" % (source_dn, dest_dn))
-                    self.delete_ou(dest_dn)
+                    self.agent.delete_dn(dest_dn)
                 else:
                     source_date = source_info['modifyTimestamp']
                     target_date = destination_groups[dest_dn]['modifyTimestamp']
@@ -510,9 +507,8 @@ def main():
     if os.path.isfile('ldap_sync.lock'):
         log_error("Lockfile present")
         return RETURN_CODES['EX_LOCKFILE']
-        sys.exit()
     else:
-        open("ldap_sync.lock", "wb")
+        open("ldap_sync.lock", "wb").close()
     try:
         # Open connection with the ldap
         try:
