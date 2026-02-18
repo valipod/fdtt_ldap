@@ -350,9 +350,12 @@ class LdapAgent(object):
 
         def _add_placeholder():
             ''' add placeholder '''
-            self.conn.modify_s(group_dn, (
-                (ldap.MOD_ADD, 'member', [b'']),
-            ))
+            try:
+                self.conn.modify_s(group_dn, (
+                    (ldap.MOD_ADD, 'member', [b'']),
+                ))
+            except ldap.TYPE_OR_VALUE_EXISTS:
+                pass  # placeholder already exists
 
         try:
             _remove()
